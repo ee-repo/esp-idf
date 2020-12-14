@@ -32,6 +32,22 @@
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
 #include "driver/i2s.h"
+#include "driver/i2c.h"
+
+#define I2C_MASTER_SCL_IO CONFIG_I2C_MASTER_SCL               /*!< gpio number for I2C master clock */
+#define I2C_MASTER_SDA_IO CONFIG_I2C_MASTER_SDA               /*!< gpio number for I2C master data  */
+//#define I2C_MASTER_NUM I2C_NUMBER(CONFIG_I2C_MASTER_PORT_NUM) /*!< I2C port number for master dev */
+#define I2C_MASTER_NUM I2C_NUM_1 /*!< I2C port number for master dev */
+#define I2C_MASTER_FREQ_HZ CONFIG_I2C_MASTER_FREQUENCY        /*!< I2C master clock frequency */
+#define I2C_MASTER_TX_BUF_DISABLE 0                           /*!< I2C master doesn't need buffer */
+#define I2C_MASTER_RX_BUF_DISABLE 0                           /*!< I2C master doesn't need buffer */
+#define I2C_ADDR (0x38 >> 1)
+#define WRITE_BIT I2C_MASTER_WRITE              /*!< I2C master write */
+#define READ_BIT I2C_MASTER_READ                /*!< I2C master read */
+#define ACK_CHECK_EN 0x1                        /*!< I2C master will check ack from slave*/
+#define ACK_CHECK_DIS 0x0                       /*!< I2C master will not check ack from slave */
+#define ACK_VAL 0x0                             /*!< I2C ack value */
+#define NACK_VAL 0x1                            /*!< I2C nack value */
 
 /* event for handler "bt_av_hdl_stack_up */
 enum {
@@ -40,6 +56,82 @@ enum {
 
 /* handler for bluetooth stack enabled events */
 static void bt_av_hdl_stack_evt(uint16_t event, void *p_param);
+
+
+/**
+ * @brief i2c master initialization
+ */
+static esp_err_t i2c_init(void)
+{
+    int i2c_master_port = I2C_MASTER_NUM;
+    i2c_config_t conf;
+    conf.mode = I2C_MODE_MASTER;
+    conf.sda_io_num = I2C_MASTER_SDA_IO;
+    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.scl_io_num = I2C_MASTER_SCL_IO;
+    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+    conf.master.clk_speed = 100000; //I2C_MASTER_FREQ_HZ;
+    i2c_param_config(i2c_master_port, &conf);
+    return i2c_driver_install(i2c_master_port, conf.mode, I2C_MASTER_RX_BUF_DISABLE, I2C_MASTER_TX_BUF_DISABLE, 0);
+}
+
+/**
+ * @brief test code to read esp-i2c-slave
+ *        We need to fill the buffer of esp slave device, then master can read them out.
+ *
+ * _______________________________________________________________________________________
+ * | start | slave_addr + rd_bit +ack | read n-1 bytes + ack | read 1 byte + nack | stop |
+ * --------|--------------------------|----------------------|--------------------|------|
+ *
+ */
+static esp_err_t i2c_read(uint8_t reg, uint8_t *data_rd)
+{
+    esp_err_t ret = 0;
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    ret += i2c_master_start(cmd);
+    ret += i2c_master_write_byte(cmd, (I2C_ADDR << 1) | WRITE_BIT, ACK_CHECK_EN);
+    ret += i2c_master_write_byte(cmd, reg, ACK_CHECK_EN);
+    ret += i2c_master_start(cmd);
+    ret += i2c_master_write_byte(cmd, (I2C_ADDR << 1) | READ_BIT, ACK_CHECK_EN);
+    ret += i2c_master_read_byte(cmd, data_rd, NACK_VAL);
+    ret += i2c_master_stop(cmd);
+    ret += i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_RATE_MS);
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
+
+/**
+ * @brief Test code to write esp-i2c-slave
+ *        Master device write data to slave(both esp32),
+ *        the data will be stored in slave buffer.
+ *        We can read them out from slave buffer.
+ *
+ * ___________________________________________________________________
+ * | start | slave_addr + wr_bit + ack | write n bytes + ack  | stop |
+ * --------|---------------------------|----------------------|------|
+ *
+ */
+static esp_err_t i2c_write(uint8_t reg, uint8_t data)
+{
+    esp_err_t ret = 0;
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    printf("l:%d, ret = %d\n", __LINE__, ret);
+    ret += i2c_master_start(cmd);
+    printf("l:%d, ret = %d\n", __LINE__, ret);
+    ret += i2c_master_write_byte(cmd, (I2C_ADDR << 1) | WRITE_BIT, ACK_CHECK_EN);
+    printf("l:%d, ret = %d\n", __LINE__, ret);
+    ret += i2c_master_write_byte(cmd, reg, ACK_CHECK_EN);
+    printf("l:%d, ret = %d\n", __LINE__, ret);
+    ret += i2c_master_write(cmd, &data, 1, ACK_CHECK_EN);
+    printf("l:%d, ret = %d\n", __LINE__, ret);
+    ret += i2c_master_stop(cmd);
+    printf("l:%d, ret = %d\n", __LINE__, ret);
+    //ret += i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 1000 / portTICK_RATE_MS);
+    ret += i2c_master_cmd_begin(I2C_MASTER_NUM, cmd, 100);
+    printf("l:%d, ret = %d\n", __LINE__, ret);
+    i2c_cmd_link_delete(cmd);
+    return ret;
+}
 
 
 void app_main(void)
@@ -61,11 +153,13 @@ void app_main(void)
         .sample_rate = 44100,
         .bits_per_sample = 16,
         .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,                           //2-channels
-        .communication_format = I2S_COMM_FORMAT_STAND_MSB,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
         .dma_buf_count = 6,
         .dma_buf_len = 60,
         .intr_alloc_flags = 0,                                                  //Default interrupt priority
-        .tx_desc_auto_clear = true                                              //Auto clear tx descriptor on underflow
+        .tx_desc_auto_clear = true,                                             //Auto clear tx descriptor on underflow
+        .use_apll = true,
+        .fixed_mclk = 0
     };
 
 
@@ -82,8 +176,25 @@ void app_main(void)
     };
 
     i2s_set_pin(0, &pin_config);
+ // mclk out
+    PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO0_U, FUNC_GPIO0_CLK_OUT1);
+    WRITE_PERI_REG(PIN_CTRL, 0xFFF0);
 #endif
 
+    int r;
+    i2c_init();
+    printf("finished i2c init\n");
+    r = i2c_write(0x05, 0xdc);
+    r = i2c_write(0x07, 0x30);
+    printf("finished i2c write(%d)\n", r);
+    u_int8_t buf[0x30];
+    for(int i=0; i<0x50; i++)
+    {
+        r = i2c_read(i, buf+i);
+        printf("finished i2c read(%d)\n", r);
+    }
+    for(int i=0; i<0x30; i++)
+        printf("r[%02x]:%02x\n", i, buf[i]);
 
     ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_BLE));
 
